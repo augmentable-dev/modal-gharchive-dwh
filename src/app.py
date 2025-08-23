@@ -1,11 +1,13 @@
 import modal
 
 # Modal app and image configuration
-image = modal.Image.debian_slim().pip_install("duckdb", "requests")
+image = modal.Image.debian_slim().uv_pip_install("duckdb", "requests", "pypdl")
 app = modal.App("gharchive", image=image)
 
 # Volume configurations
-downloaded = modal.Volume.from_name("gharchive-downloaded-json", create_if_missing=True)
+downloaded = modal.Volume.from_name(
+    "gharchive-downloaded-json-archive", create_if_missing=True
+)
 parquet = modal.Volume.from_name("gharchive-parquet", create_if_missing=True)
 
 # Data paths
