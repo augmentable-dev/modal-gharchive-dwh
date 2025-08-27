@@ -1,6 +1,14 @@
 import modal
 from datetime import date
-from .app import app, downloaded, DOWNLOADED_DATA_PATH, parquet, PARQUET_DATA_PATH, gharchive, GHARCHIVE_DATA_PATH
+from .app import (
+    app,
+    downloaded,
+    DOWNLOADED_DATA_PATH,
+    parquet,
+    PARQUET_DATA_PATH,
+    gharchive,
+    GHARCHIVE_DATA_PATH,
+)
 
 
 @app.function(
@@ -12,8 +20,9 @@ from .app import app, downloaded, DOWNLOADED_DATA_PATH, parquet, PARQUET_DATA_PA
     # min_containers=500,
     ephemeral_disk=600 * 1024,
 )
+@modal.concurrent(max_inputs=8)
 def download_and_copy_day(year: int, month: int, day: int):
-    """Download all JSON.gz files for a specific day into a temporary directory and then copies them into the gharchive volume."""
+    """Download all JSON.gz files for a specific day into a temporary directory and then copy them into the gharchive volume."""
     import os
     import tempfile
     import time
@@ -27,27 +36,20 @@ def download_and_copy_day(year: int, month: int, day: int):
     for hour in range(24):
         url = f"https://data.gharchive.org/{year}-{month:02d}-{day:02d}-{hour}.json.gz"
         filepath = os.path.join(tmp_dir, f"{year}-{month:02d}-{day:02d}-{hour}.json.gz")
-        
+        hour_start = time.time()
+
         # Create temp file in same dir
-        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(filepath), prefix=f"{year}-{month:02d}-{day:02d}-{hour}.json.gz")
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            dir=os.path.dirname(filepath),
+            prefix=f"{year}-{month:02d}-{day:02d}-{hour}.json.gz",
+        )
         os.close(tmp_fd)
-
-        last_progress_log = time.time()
-
-        def progress(download_t, download_d, upload_t, upload_d):
-            nonlocal last_progress_log
-            if (time.time() - last_progress_log) > 2:
-                last_progress_log = time.time()
-                progress = download_d / download_t if download_t > 0 else 0.0
-                print(f"{filepath} download progress: {progress:.2%}")
 
         with open(tmp_path, "wb") as f:
             c = pycurl.Curl()
-            c.setopt(c.URL, url)
             c.setopt(c.FOLLOWLOCATION, 1)
+            c.setopt(c.URL, url)
             c.setopt(c.WRITEDATA, f)
-            c.setopt(c.NOPROGRESS, False)
-            c.setopt(c.XFERINFOFUNCTION, progress)
             c.perform()
             c.close()
 
@@ -55,6 +57,10 @@ def download_and_copy_day(year: int, month: int, day: int):
         with open(tmp_path, "rb", buffering=0) as f:
             os.fsync(f.fileno())
             file_size = os.fstat(f.fileno()).st_size
+
+        print(
+            f"Downloaded {filepath} ({file_size} bytes) in {time.time() - hour_start} seconds ({(file_size / (1024 * 1024)) / (time.time() - hour_start):.2f} MB/s)"
+        )
 
         # Atomically swap into place
         os.replace(tmp_path, filepath)
@@ -66,10 +72,10 @@ def download_and_copy_day(year: int, month: int, day: int):
         finally:
             os.close(dir_fd)
 
-        print(f"Downloaded {filepath} in {time.time() - start} seconds")
-
     # Copy the tmp dir to the gharchive volume
-    shutil.copytree(tmp_dir, os.path.join(GHARCHIVE_DATA_PATH, f"{year}/{month:02d}/{day:02d}"))
+    shutil.copytree(
+        tmp_dir, os.path.join(GHARCHIVE_DATA_PATH, f"{year}/{month:02d}/{day:02d}")
+    )
 
     # Commit the volumes
     gharchive.commit()
@@ -79,13 +85,14 @@ def download_and_copy_day(year: int, month: int, day: int):
 
     return time.time() - start, file_size
 
+
 @app.function(
     volumes={DOWNLOADED_DATA_PATH: downloaded},
     cloud="aws",
     region="us-east-1",
     timeout=36000,
     retries=3,
-    min_containers=500,
+    # min_containers=500,
     ephemeral_disk=600 * 1024,
 )
 # @modal.concurrent(max_inputs=1)
