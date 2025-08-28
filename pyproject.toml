@@ -1,5 +1,5 @@
 [project]
-name = "modal-gharchive-dwh"
+name = "modal-gharchive"
 version = "0.1.0"
 description = "Modal app for querying the GH Archive"
 readme = "README.md"
