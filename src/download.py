@@ -25,7 +25,7 @@ def download_file(year: int, month: int, day: int, hour: int) -> tuple[str, floa
     url = f"https://data.gharchive.org/{year}-{month:02d}-{day:02d}-{hour}.json.gz"
     vol_path = f"{GHARCHIVE_DATA_PATH}/{year}/{month:02d}/{day:02d}/{hour}.json.gz"
 
-    # Stage to /tmp for speed
+    # Stage to a temporary file in /tmp which is on the attached SSD, as recommended in Modal docs: https://modal.com/docs/guide/dataset-ingestion
     tmp_dir = f"/tmp/{year}/{month:02d}/{day:02d}"
     os.makedirs(tmp_dir, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
@@ -33,7 +33,7 @@ def download_file(year: int, month: int, day: int, hour: int) -> tuple[str, floa
     )
     os.close(fd)
 
-    # Configure curl (inline)
+    # Configure curl
     c = pycurl.Curl()
     c.setopt(c.URL, url)
     c.setopt(c.FOLLOWLOCATION, 1)
@@ -42,7 +42,7 @@ def download_file(year: int, month: int, day: int, hour: int) -> tuple[str, floa
         c.USERAGENT, "gharchive-downloader/1.0 (contact: patrick.devivo@gmail.com)"
     )  # may help with rate limiting
     c.setopt(c.NOSIGNAL, 1)
-    c.setopt(c.CONNECTTIMEOUT, 10)  # seconds
+    c.setopt(c.CONNECTTIMEOUT, 10)
     c.setopt(
         c.TIMEOUT, 60 * 5
     )  # total timeout - most downloads should occur within this
@@ -52,7 +52,7 @@ def download_file(year: int, month: int, day: int, hour: int) -> tuple[str, floa
     hdr_buf = io.BytesIO()
     c.setopt(c.HEADERFUNCTION, hdr_buf.write)
 
-    # Download → /tmp, fsync for durability
+    # Execute the download → /tmp, then fsync for durability
     with open(tmp_path, "wb", buffering=1024 * 1024) as f:
         c.setopt(c.WRITEDATA, f)
         c.perform()
@@ -76,6 +76,7 @@ def download_file(year: int, month: int, day: int, hour: int) -> tuple[str, floa
         except FileNotFoundError:
             pass
 
+        # Sometimes there's missing hours, but raise on 404 anyways to retry and report
         if status == 404:
             time.sleep(random.uniform(0.5, 2.0))
             raise RuntimeError(f"HTTP 404 for {url} (retryable)")
@@ -86,10 +87,10 @@ def download_file(year: int, month: int, day: int, hour: int) -> tuple[str, floa
             first_hdr = headers_s.splitlines()[0] if headers_s else f"HTTP {status}"
             raise RuntimeError(f"HTTP {status} for {url} ({first_hdr})")
 
-        # Other client errors: surface as failures (Modal may still retry per policy)
+        # Other client errors: surface as failures (Modal will retry)
         raise RuntimeError(f"HTTP {status} for {url}")
 
-    # Atomically publish into the volume (inline, no helpers)
+    # Publish into the Modal volume atomically
     vol_dir = os.path.dirname(vol_path)
     os.makedirs(vol_dir, exist_ok=True)
     tmp_dest = vol_path + ".part"
@@ -103,7 +104,7 @@ def download_file(year: int, month: int, day: int, hour: int) -> tuple[str, floa
     os.replace(tmp_dest, vol_path)  # atomic within the same FS
     dfd = os.open(vol_dir, os.O_DIRECTORY)
     try:
-        os.fsync(dfd)  # fsync directory entry (optional but nice)
+        os.fsync(dfd)
     finally:
         os.close(dfd)
 
@@ -171,34 +172,6 @@ def download_range(start: date, end: date = date.today()):
     gharchive.commit()
 
 
-@app.function(timeout=3600, volumes={GHARCHIVE_DATA_PATH: gharchive})
-@modal.concurrent(max_inputs=32)
-def count_events_in_file(path: str):
-    import gzip
-    import io
-
-    # Big buffered reader for speed
-    with gzip.open(path, "rb") as gz:
-        buf = io.BufferedReader(gz, buffer_size=8 * 1024 * 1024)
-        return sum(1 for _ in buf)  # 1 line == 1 event
-
-
-@app.function(timeout=3600, volumes={GHARCHIVE_DATA_PATH: gharchive})
-def count_all_events():
-    import os
-    from glob import iglob
-
-    files = [f for f in iglob(f"{GHARCHIVE_DATA_PATH}/**/*.json.gz", recursive=True)
-             if os.path.isfile(f)]
-
-    total = 0
-    for n in count_events_in_file.map(files):
-        total += n
-        print(f"counted {total:_} events so far")
-    print(f"total events: {total:_}")
-
-
 @app.local_entrypoint()
 def main():
-    # download_range.remote(date(2020, 1, 1))
-    count_all_events.remote()
+    download_range.remote(date(2020, 1, 1))
